@@ -1,0 +1,1 @@
+rm -f test && make test && ./test

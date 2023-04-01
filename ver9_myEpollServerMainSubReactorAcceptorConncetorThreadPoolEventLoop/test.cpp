@@ -1,0 +1,101 @@
+#include "Buffer.h"
+#include "InetAddress.h"
+#include "Socket.h"
+#include "ThreadPool.h"
+#include "util.h"
+#include <chrono>
+#include <functional>
+#include <iostream>
+#include <string.h>
+#include <unistd.h>
+#include <cstring>
+#include <memory>
+
+using namespace std;
+
+void oneClient(int msgs, int wait)
+{
+    Socket* sock = new Socket();
+    InetAddress* addr = new InetAddress("127.0.0.1", 1889);
+    sock->connect(addr);
+
+    int sockfd = sock->get_fd();
+
+    Buffer* sendBuffer = new Buffer();
+    Buffer* readBuffer = new Buffer();
+
+    sleep(wait);
+    int count = 0;
+    srand(time(0));
+    while (count < msgs) {
+
+        const char* init_massage = ("this is  " + to_string(count)).c_str();
+        sendBuffer->set_buf(init_massage);
+        printf("sending message: %s\n", sendBuffer->c_str());
+        ssize_t write_bytes = write(sockfd, sendBuffer->c_str(), sendBuffer->size());
+        if (write_bytes == -1) {
+            printf("socket already disconnected, can't write any more!\n");
+            break;
+        }
+        int already_read = 0;
+        char buf[1024]; // 这个buf大小无所谓
+        while (true) {
+            bzero(&buf, sizeof(buf));
+            ssize_t read_bytes = read(sockfd, buf, sizeof(buf));
+            if (read_bytes > 0) {
+                readBuffer->append(buf, read_bytes);
+                already_read += read_bytes;
+            } else if (read_bytes == 0) { // EOF
+                printf("server disconnected!\n");
+                exit(EXIT_SUCCESS);
+            }
+            if (already_read >= sendBuffer->size()) {
+                printf("count: %d, message from server: %s\n", count++, readBuffer->c_str());
+                break;
+            }
+        }
+        readBuffer->clear();
+    }
+    delete addr;
+    delete sock;
+    delete sendBuffer;
+    delete readBuffer;
+}
+
+int main(int argc, char* argv[])
+{
+    int threads = 100;
+    int msgs = 100;
+    int wait = 0;
+    int o;
+    const char* optstring = "t:m:w:";
+    while ((o = getopt(argc, argv, optstring)) != -1) {
+        switch (o) {
+        case 't':
+            threads = stoi(optarg);
+            break;
+        case 'm':
+            msgs = stoi(optarg);
+            break;
+        case 'w':
+            wait = stoi(optarg);
+            break;
+        case '?':
+            printf("error optopt: %c\n", optopt);
+            printf("error opterr: %d\n", opterr);
+            break;
+        }
+    }
+    auto start_time = std::chrono::system_clock::now();
+    ThreadPool* poll = new ThreadPool(threads);
+    std::function<void()> func = std::bind(oneClient, msgs, wait);
+    for (int i = 0; i < threads; ++i) {
+        poll->add(func);
+        std::chrono::system_clock::duration diff;
+        diff = std::chrono::system_clock::now() - start_time;
+        std::cout << (unsigned)(std::chrono::duration_cast<std::chrono::milliseconds>(diff).count());
+    }
+    delete poll;
+
+    return 0;
+}
