@@ -86,12 +86,16 @@ struct epoll_event events[MAX_EVENTS], ev;
 ev.events = EPOLLIN; // ET模式
 ev.data.fd = sockfd_listen; // 该IO口为服务器socket fd
 epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd_listen, &ev); //将服务器listen socket fd添加到epoll
+
+int nfds = epoll_wait(epfd, events, MAX_EVENTS, timeout);  // poll
+errif(nfds == -1, "epoll wait error");
+for(int i = 0; i < nfds; ++i){...}
 ```
 ### 3. 面向对象封装
 略
 ### 4. epoll进阶：Channel
 原来的events里，`data`用了union的 `int fd`，也就是只知道文件描述符，不知道更多信息。
-我们要用void* ptr，指向Channel对象，Channel类可以封装更多信息，如该fd属于哪种类型（ftp、http）。
+我们要用void* ptr，指向Channel对象，Channel类可以封装更多信息，如该fd属于哪种类型（ftp、http）、注册回调函数等。
 ```cpp
 class Channel{
 private:
@@ -124,11 +128,12 @@ void Epoll::updateChannel(Channel* channel)
     }
 }
 ```
-之后改写`ep.poll()`的活动events的类型是`vector<Channel*>`，利用`int chfd = activeChannels[i]->getFd();`获得文件描述符。
+之后改写`ep.poll()`的活动events的type是`vector<Channel*>`，利用`int chfd = activeChannels[i]->getFd();`获得文件描述符。
 ### 5. Reactor模式
 ![image.png](https://cdn.nlark.com/yuque/0/2023/png/21765548/1679465908521-da29eff8-a536-41d1-a14f-943669b99209.png#averageHue=%23f8f0e2&clientId=u028b706c-46b7-4&from=paste&height=417&id=uf67187ce&name=image.png&originHeight=834&originWidth=1427&originalType=binary&ratio=2&rotation=0&showTitle=true&size=276780&status=done&style=none&taskId=u42cedf9a-1dfe-49cc-975e-cd7441497a0&title=%E5%8D%95Reactor%E5%8D%95%E7%BA%BF%E7%A8%8B%E6%A8%A1%E5%BC%8F&width=713.5 "单Reactor单线程模式")
 接下来将项目改写为单Reactor单线程和事件循环模式：
 将服务器抽象成`Server`类，存初始化构造函数（最初的监听处理）和处理请求的函数体，类中有一个Reactor(现在还是单Reactor），Reactor里的核心是**事件循环**`EventLoop`类，其成员变量是一个ep对象，其实就是不断`ep.poll()`返回vector<Channel*>并调用**回调函数**。
+现代C++：虚函数和函数包装器，《Linux多线程服务器编程》P449![image.png](https://cdn.nlark.com/yuque/0/2023/png/21765548/1679811531837-42ef01e5-4ec1-4d66-a897-a9885d965697.png#averageHue=%23dfdfdf&clientId=u9fefc310-8af7-4&from=paste&height=626&id=uad6d3b9f&name=image.png&originHeight=1252&originWidth=1124&originalType=binary&ratio=2&rotation=0&showTitle=false&size=987008&status=done&style=none&taskId=u26fb67a4-f38e-4c9c-af44-9e5f80b6de9&title=&width=562)
 Channel类的成员不再是ep，而是封装了ep的EventLoop对象，改写所有构造函数。
 **回调函数**是这次改写新增的功能，根据创建Channel时注册的回调函数（不同描述符和事件类型的函数不同），执行不同的处理（连接or读写）。
 **回调函数**前置知识：对象包装器和绑定器
@@ -147,7 +152,7 @@ void newConnection(Socket *serv_sock);
 
 std::function<void()> call_back_func_read = std::bind(&Server::handleReadEvent, this, clnt_sock->getFd());
 ```
-注意由于绑定的函数是类成员函数，所以语法上第一个参数是**类成员函数指针**，第二个参数是**实例对象指针this**，第三个参数才是函数参数。
+注意由于绑定的函数是类成员函数，所以语法上第一个参数是**类的成员函数体指针**，第二个参数是**同一个类的实例对象指针this**，第三个参数才是函数参数。
 #### 架构理解：
 EventLoop包含ep，EventLoop不断loop()，即调用其ep.poll()，将事件列表vector<Channel*>返回，Channel有所属ep和fd信息，另外还有本身注册的回调函数，loop在handle处理Channel时直接调用同一个接口即可（**利用function和bind而不是虚函数实现类似接口功能和多态**？）。
 EventLoop中的ep和ep的Channel来自Server类，首先Server初始化监听的Channel并注册连接回调函数，此后当Channel建立连接时，这个**连接回调函数**会新建Channel和注册对应的**read回调函数**，并加到loop(ep)。
@@ -180,6 +185,10 @@ Server类构造函数中，首先调用Accptor类构造函数为loop新建监听
 2. 建立连接：Loop调用初始化的最初的监听Channel的回调函数，触发new Connection：新建一个带有echo回调的Channel给Loop。
 3. 会话：客户端Channel执行其特有的echo回调函数。
 ### 7.1 缓冲区的封装
+*注：此处的缓冲区指应用层缓冲区，并非传输层操作系统socket缓冲区
+《Muduo》中的理解![image.png](https://cdn.nlark.com/yuque/0/2023/png/21765548/1680417349587-1b9edefa-ae18-457f-8efe-08ab74bc0beb.png#averageHue=%23e0e0e0&clientId=uad9ca9bc-58a4-4&from=paste&height=722&id=u3d1033a2&name=image.png&originHeight=1444&originWidth=1662&originalType=binary&ratio=2&rotation=0&showTitle=false&size=1316616&status=done&style=none&taskId=u3bfdbc0b-e212-4a4f-8257-c394d79fb85&title=&width=831)
+![image.png](https://cdn.nlark.com/yuque/0/2023/png/21765548/1680417472881-3a163e22-d751-4f67-9e0e-d119d108a9fd.png#averageHue=%23dbdbdb&clientId=uad9ca9bc-58a4-4&from=paste&height=204&id=u76b9bf48&name=image.png&originHeight=408&originWidth=1678&originalType=binary&ratio=2&rotation=0&showTitle=false&size=418055&status=done&style=none&taskId=u299c1664-feb5-46a3-b064-897470e56ed&title=&width=839)
+以上是业务方面（TCP缓冲区满后阻塞和TCP粘包问题）
 在现在的echo函数中，我们通过非阻塞式IO，不断读**服务端指定的buf大小**的数据，直到读完**客户端buf大小（**非阻塞式IO情况下read返回-1且error=11)。这样做的缺点是：用户真正输入的消息可能小于客户端buf，客户端buf形如：「消息+\0+空值空值空值...」，服务端读取时也会把**空值读完**，造成了浪费。
 因此我们封装服务端buf，用一个临时服务端buf不断读read，存到服务端buf中，当读到\0后不再读存了, 另外，**读完后才输出全部内容**（而**不是之前读一次服务端buf就输出一次**）。
 ```cpp
@@ -246,11 +255,89 @@ void Channel::handle_event() {
 ```
 ### 9 主从Reactor多线程
 ![image.png](https://cdn.nlark.com/yuque/0/2023/png/21765548/1679550272404-aff6d1a6-add7-4a8b-9583-8d112fd2d376.png#averageHue=%23f8efe0&clientId=u0b6a97a5-70f6-4&from=paste&height=631&id=uf4e68745&name=image.png&originHeight=1262&originWidth=1772&originalType=binary&ratio=2&rotation=0&showTitle=false&size=429608&status=done&style=none&taskId=ubb82f3ad-b996-40d2-8d37-4b1b4ae7c6b&title=&width=886)
-架构的升级：当前版本是单Reactor多线程模式
+架构的升级：
+在原来的设计中，只有一个Reactor（Loop），Acceptor建立Channel发到这个Loop中，而Channel执行回调是交给Loop**线程池**任务队列。即**one loop per thread**
+现在改造为多Reactor多线程模式，线程池**每个线程运行一个sub_Reactor_Loop**
+MainReactor也就是`Server`, 初始化时先构造一个自己的loop，之后创建Acceptor并设置属于自己这个loop。接着Acceptor初始化：新建一个listen Channel，回调函数是accept socket连接。
+区别：线程池现在放在MainReactor中，里面的每个线程运行的函数是对应sub_reactor的Loop()。
+Acceptor的loop收到连接事件后，accept之建立socket_client，并将其按hash发给某个sub_reactor（此处涉及到负载均衡算法源地址哈希法，此外还有Round-Robin按序轮询），具体操作是基于这个Socket建立`Connection`对象->建立`Channel`对象(此时绑定了echo回调）->把Channel发到对应的sub_reactor的loop，sub_reactor在接到建立连接的sockfd_client后，为其建立Channel并加到ep，enableRead()（ET模式）
+
 Todo list:
 服务器版本的迭代是从C语言风格逐渐到C++风格，从单线程到多线程，从阻塞式IO到非阻塞式IO，从任务驱动到事件驱动。已然变成屎山，需要重构。
 
-- [ ] 任务队列的拷贝用右值移动、完美转发
-- [ ] 线程池执行函数返回值
-- [ ] 智能指针
+- [x] 任务队列的拷贝用右值移动、完美转发
+- [x] 线程池执行函数返回值
+- [x] 智能指针
 - [ ] 内存泄露检测、性能测试
+- [ ] epoll_ctl(epfd, EPOLL_CTL_DEL, sockfd, NULL);   //删除事件？
+### 10 业务逻辑与Connection分离
+原Channel的Echo回调函数由Connection类完成注册，作为网络库我们需要支持server自定义业务流程。
+add:
+
+- 为Connection同时支持阻塞I/O和非阻塞I/O
+- Connection 的枚举类型state
+- 服务端server自定义业务逻辑
+```cpp
+void handle_http_request(Connection* conn) {
+  conn->Read();
+  std::string request = conn->GetReadBuffer()->ToStr();
+
+  // 解析请求
+  std::istringstream request_stream(request);
+  std::string method, path, version;
+  request_stream >> method >> path >> version;
+
+  // 检查方法是否为GET
+  if (method != "GET") {
+    conn->SetSendBuffer("HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n");
+    conn->Write();
+    return;
+  }
+
+  // 解析查询参数
+  std::map<std::string, std::string> query_params;
+  std::size_t query_pos = path.find('?');
+  if (query_pos != std::string::npos) {
+    std::string query_string = path.substr(query_pos + 1);
+    std::istringstream query_stream(query_string);
+    std::string key_value_pair;
+    while (std::getline(query_stream, key_value_pair, '&')) {
+      std::size_t equals_pos = key_value_pair.find('=');
+      if (equals_pos != std::string::npos) {
+        std::string key = key_value_pair.substr(0, equals_pos);
+        std::string value = key_value_pair.substr(equals_pos + 1);
+        query_params[key] = value;
+      }
+    }
+    path = path.substr(0, query_pos);
+  }
+
+  // 构造响应
+  std::ostringstream response_stream;
+  response_stream << "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+  response_stream << "Method: " << method << "\r\n";
+  response_stream << "Path: " << path << "\r\n";
+  for (auto& pair : query_params) {
+    response_stream << "Query param: " << pair.first << "=" << pair.second << "\r\n";
+  }
+
+  conn->SetSendBuffer(response_stream.str().c_str());
+
+  conn->Write();
+}
+
+server->OnConnect([](Connection* conn) {
+    handle_http_request(conn);
+});
+```
+示例：在server中，为新建立的Connection注册自定义handle函数
+
+## 问题
+### 触发模式相关
+对于Acceptor，接受连接的处理时间较短、报文数据极小，并且一般不会有特别多的新连接在同一时间到达，所以Acceptor没有必要采用epoll ET模式，也没有必要用线程池。由于不会成为性能瓶颈，为了简单最好使用阻塞式socket，故今天的源代码中做了以下改变：
+
+1. Acceptor socket fd（服务器监听socket）使用阻塞式
+2. Acceptor使用LT模式，建立好连接后处理事件fd读写用ET模式
+3. Acceptor建立连接不使用线程池，建立好连接后处理事件用线程池
+
+![image.png](https://cdn.nlark.com/yuque/0/2023/png/21765548/1680417621227-9f5583a6-e856-4117-9f83-6c78653c17d7.png#averageHue=%23dcdcdc&clientId=uad9ca9bc-58a4-4&from=paste&height=191&id=u39c5bc02&name=image.png&originHeight=382&originWidth=1608&originalType=binary&ratio=2&rotation=0&showTitle=true&size=373150&status=done&style=none&taskId=u409eba9d-17e3-41cf-adb3-a1dbef29bc2&title=206&width=804 "206")
